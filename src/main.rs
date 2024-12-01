@@ -27,7 +27,7 @@ const CLASS_ALLOWLIST: [&str; 5] = [
     "Chrome_RenderWidgetHostHWND",                 // gross electron apps
     "Microsoft.UI.Content.DesktopChildSiteBridge", // windows explorer main panel
     "SysTreeView32",                               // windows explorer side panel
-    "TITLE_BAR_SCAFFOLDING_WINDOW_CLASS",          // windows explorer side panel
+    "TITLE_BAR_SCAFFOLDING_WINDOW_CLASS",          // windows explorer title bar
     "DirectUIHWND",                                // windows explorer after interaction
 ];
 
@@ -119,16 +119,24 @@ fn main() -> Result<()> {
 pub fn listen_for_movements(hwnds: Option<PathBuf>) {
     std::thread::spawn(move || {
         let receiver = message_loop::start().expect("could not start winput message loop");
+
         let mut eligibility_cache = HashMap::new();
-        let mut map_instantiation_time = Instant::now();
-        let map_max_age = Duration::from_secs(60) * 10; // 10 minutes
+        let mut class_cache: HashMap<isize, String> = HashMap::new();
+        let mut hwnd_pair_cache: HashMap<isize, isize> = HashMap::new();
+
+        let mut cache_instantiation_time = Instant::now();
+        let max_cache_age = Duration::from_secs(60) * 10; // 10 minutes
 
         loop {
-            // clear our cache every 10 minutes
-            if map_instantiation_time.elapsed() > map_max_age {
-                tracing::info!("clearing hwnd cache, max map age is >10 minutes");
+            // clear our caches every 10 minutes
+            if cache_instantiation_time.elapsed() > max_cache_age {
+                tracing::info!("clearing caches, cache age is >10 minutes");
+
                 eligibility_cache = HashMap::new();
-                map_instantiation_time = Instant::now();
+                class_cache = HashMap::new();
+                hwnd_pair_cache = HashMap::new();
+
+                cache_instantiation_time = Instant::now();
             }
 
             if let Event::MouseMoveRelative { .. } = receiver.next_event() {
@@ -136,53 +144,103 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                     (window_at_cursor_pos(), foreground_window())
                 {
                     if cursor_pos_hwnd != foreground_hwnd {
-                        let mut should_raise = false;
-                        let mut should_cache = false;
-
-                        // check our cache first
-                        if let Some(eligible) = eligibility_cache.get(&cursor_pos_hwnd) {
-                            if *eligible {
-                                should_raise = true;
-                                tracing::debug!(
-                                    "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
-                                );
+                        if let Some(paired_hwnd) = hwnd_pair_cache.get(&cursor_pos_hwnd) {
+                            if foreground_hwnd == *paired_hwnd {
+                                tracing::trace!("hwnds {cursor_pos_hwnd} and {foreground_hwnd} are known to refer to the same application, skipping");
+                                continue;
                             }
-                        } else {
-                            should_cache = true;
                         }
 
-                        if !should_raise {
-                            // step one: test against known classes
-                            if let (Ok(cursor_pos_class), Ok(foreground_class)) = (
-                                real_window_class_w(cursor_pos_hwnd),
-                                real_window_class_w(foreground_hwnd),
-                            ) {
-                                // windows explorer related focus loop weirdness fixes in this block
-                                {
-                                    if cursor_pos_class == "DirectUIHWND"
-                                        && foreground_class == "CabinetWClass"
-                                    {
-                                        continue;
-                                    }
+                        let mut should_raise = false;
+                        let mut should_cache_eligibility = false;
 
-                                    if cursor_pos_class
-                                        == "Microsoft.UI.Content.DesktopChildSiteBridge"
-                                        && foreground_class == "CabinetWClass"
-                                    {
-                                        continue;
-                                    }
+                        // check our class cache to avoid syscalls
+                        let mut cursor_pos_class = class_cache.get(&cursor_pos_hwnd).cloned();
+                        let mut foreground_class = class_cache.get(&foreground_hwnd).cloned();
+
+                        // make syscalls if necessary and populate the class cache
+                        match &cursor_pos_class {
+                            None => {
+                                if let Ok(class) = real_window_class_w(cursor_pos_hwnd) {
+                                    class_cache.insert(cursor_pos_hwnd, class.clone());
+                                    cursor_pos_class = Some(class);
+                                }
+                            }
+                            Some(class) => {
+                                tracing::debug!(
+                                    "hwnd {cursor_pos_hwnd} class was found in the cache: {class}"
+                                );
+                            }
+                        }
+
+                        // make syscalls if necessary and populate the class cache
+                        match &foreground_class {
+                            None => {
+                                if let Ok(class) = real_window_class_w(foreground_hwnd) {
+                                    class_cache.insert(foreground_hwnd, class.clone());
+                                    foreground_class = Some(class);
+                                }
+                            }
+                            Some(class) => {
+                                tracing::debug!(
+                                    "hwnd {foreground_hwnd} class was found in the cache: {class}"
+                                );
+                            }
+                        }
+
+                        if let (Some(cursor_pos_class), Some(foreground_class)) =
+                            (cursor_pos_class, foreground_class)
+                        {
+                            // windows explorer fixes - populate the hwnd pair cache if necessary
+                            {
+                                if cursor_pos_class == "DirectUIHWND"
+                                    && foreground_class == "CabinetWClass"
+                                {
+                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
+                                    continue;
                                 }
 
-                                // fail fast, exit this iteration of the loop and avoid any processing
-                                // if we hit a blocklist entry
-                                if CLASS_BLOCKLIST.contains(&&*cursor_pos_class) {
+                                if cursor_pos_class == "Microsoft.UI.Content.DesktopChildSiteBridge"
+                                    && foreground_class == "CabinetWClass"
+                                {
+                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
+                                    continue;
+                                }
+                            }
+
+                            // steam fixes - populate the hwnd pair cache if necessary
+                            {
+                                if cursor_pos_class == "Chrome_RenderWidgetHostHWND"
+                                    && foreground_class == "SDL_app"
+                                {
+                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
+                                    continue;
+                                }
+                            }
+
+                            // check our eligibility cache
+                            if let Some(eligible) = eligibility_cache.get(&cursor_pos_hwnd) {
+                                if *eligible {
+                                    should_raise = true;
+                                    tracing::debug!(
+                                        "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
+                                    );
+                                }
+                            } else {
+                                should_cache_eligibility = true;
+                            }
+
+                            // if the eligibility for this hwnd isn't cached, then do some tests
+                            if !should_raise {
+                                // step one: test against known classes
+                                if CLASS_BLOCKLIST.contains(&cursor_pos_class.as_str()) {
                                     tracing::debug!(
                                         "window class {cursor_pos_class} is blocklisted"
                                     );
                                     continue;
                                 }
 
-                                if CLASS_ALLOWLIST.contains(&&*cursor_pos_class) {
+                                if CLASS_ALLOWLIST.contains(&cursor_pos_class.as_str()) {
                                     tracing::debug!(
                                         "window class {cursor_pos_class} is allowlisted"
                                     );
@@ -192,18 +250,18 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 if !should_raise {
                                     tracing::trace!("window class is {cursor_pos_class}");
                                 }
-                            }
 
-                            // step two: if available, test against known hwnds
-                            if !should_raise {
-                                if let Some(hwnds) = &hwnds {
-                                    if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                        if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
-                                            tracing::debug!(
-                                                "hwnd {cursor_pos_hwnd} was found in {}",
-                                                hwnds.display()
-                                            );
-                                            should_raise = true;
+                                // step two: if available, test against known hwnds
+                                if !should_raise {
+                                    if let Some(hwnds) = &hwnds {
+                                        if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
+                                            if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
+                                                tracing::debug!(
+                                                    "hwnd {cursor_pos_hwnd} was found in {}",
+                                                    hwnds.display()
+                                                );
+                                                should_raise = true;
+                                            }
                                         }
                                     }
                                 }
@@ -211,7 +269,8 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         }
 
                         if should_raise {
-                            if should_cache {
+                            if should_cache_eligibility {
+                                // ensure we cache eligibility to avoid syscalls and tests next time
                                 eligibility_cache.insert(cursor_pos_hwnd, true);
                             }
 
