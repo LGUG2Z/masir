@@ -48,9 +48,9 @@ enum MatchingStrategy {
 #[derive(Parser)]
 #[clap(author, about, version)]
 struct Opts {
-    /// Enable komorebi integration to avoid raising unmanaged windows
+    /// Disable automatic integrations with tiling window managers (e.g. komorebi)
     #[clap(long)]
-    komorebi: bool,
+    disable_integrations: bool,
     /// Path to a file with known focus-able HWNDs (e.g. komorebi.hwnd.json)
     #[clap(long)]
     hwnds: Option<PathBuf>,
@@ -60,20 +60,20 @@ fn main() -> Result<()> {
     let opts: Opts = Opts::parse();
 
     let hwnds = match opts.hwnds {
+        None if opts.disable_integrations => None,
         None => {
+            let hwnds: PathBuf = dirs::data_local_dir()
+                .expect("there is no local data directory")
+                .join("komorebi")
+                .join("komorebi.hwnd.json");
+
             // TODO: We can add checks for other window managers here
-            let hwnds_option = if opts.komorebi {
-                Some(
-                    dirs::data_local_dir()
-                        .expect("there is no local data directory")
-                        .join("komorebi")
-                        .join("komorebi.hwnd.json"),
-                )
+
+            if hwnds.is_file() {
+                Some(hwnds)
             } else {
                 None
-            };
-
-            hwnds_option.filter(|hwnds| hwnds.is_file())
+            }
         }
         Some(hwnds) => {
             if hwnds.is_file() {
