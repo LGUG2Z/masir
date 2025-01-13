@@ -13,7 +13,7 @@ ctrlc = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 windows-core = "0.58"
-dirs = "5"
+dirs = "6"
 clap = { version = "4", features = ["derive"] }
 
 [dependencies.windows]
