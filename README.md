@@ -52,11 +52,12 @@ through [Ko-fi](https://ko-fi.com/lgug2z).
 
 # Installation
 
-While package submissions to `scoop` and `winget` are pending, you can install `masir` using `cargo`:
-
-```shell
-cargo install --git https://github.com/LGUG2Z/masir
+```powershell
+winget install LGUG2Z.masir
 ```
+
+`masir` can be run as a standalone process, or launched alongside `komorebi`
+using the `komorebic start` command with the `--masir` flag.
 
 # Contribution Guidelines
 
