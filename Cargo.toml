@@ -12,7 +12,7 @@ paste = "1"
 ctrlc = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-windows-core = "0.60"
+windows-core = "0.62"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 
