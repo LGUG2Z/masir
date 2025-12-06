@@ -67,9 +67,9 @@ macro_rules! define_config {
 
 define_config! {
     /// Whether to focus fullscreen windows when the cursor moves over them.
-    /// When `false`, windows that are fullscreen or have dimensions equal to
-    /// their monitor will not be focused on mouse hover.
-    focus_fullscreen_windows: bool = false,
+    /// When `true`, windows that are fullscreen or have dimensions equal to
+    /// their monitor will be focused on mouse hover.
+    focus_fullscreen_windows: bool = true,
 }
 
 pub struct Config {
@@ -179,7 +179,7 @@ impl Config {
         }
     }
 
-    /// If there's fields in the default config file that aren't in the current config file,
+    /// If there are fields in the default config file that aren't in the current config file,
     /// add them with their default values.
     fn migrate_if_needed(config_path: &PathBuf, current_contents: &str) -> Result<bool> {
         let current: Value = serde_json::from_str(current_contents)?;
