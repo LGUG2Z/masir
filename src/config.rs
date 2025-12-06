@@ -179,7 +179,7 @@ impl Config {
         }
     }
 
-    /// If there's fields in the default config file that aren't in the current config file,
+    /// If there are fields in the default config file that aren't in the current config file,
     /// add them with their default values.
     fn migrate_if_needed(config_path: &PathBuf, current_contents: &str) -> Result<bool> {
         let current: Value = serde_json::from_str(current_contents)?;
