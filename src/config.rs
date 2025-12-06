@@ -100,6 +100,7 @@ impl Config {
 
     pub fn load_or_create(overrides: ConfigOverrides) -> Result<Arc<Self>> {
         let config_path = Self::path()?;
+        Self::ensure_parent_dir(&config_path)?;
         let data = Self::load_data(&config_path)?;
         let data = Arc::new(RwLock::new(data));
 
@@ -110,6 +111,22 @@ impl Config {
             overrides,
             watcher: Some(watcher),
         }))
+    }
+
+    fn ensure_parent_dir(config_path: &Path) -> Result<()> {
+        match config_path.parent() {
+            Some(parent) => {
+                if !parent.exists() {
+                    tracing::info!("creating config directory at {}", parent.display());
+                    fs::create_dir_all(parent)?;
+                }
+                Ok(())
+            }
+            None => Err(eyre!(
+                "config path '{}' has no parent directory to watch",
+                config_path.display()
+            )),
+        }
     }
 
     fn load_data(config_path: &PathBuf) -> Result<ConfigData> {
@@ -141,7 +158,9 @@ impl Config {
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => {
-                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) 
+                    && event.paths.iter().any(|p| p == &path_for_watcher)
+                    {
                         Self::handle_file_change(&data, &path_for_watcher);
                     }
                 }
