@@ -1,12 +1,22 @@
+mod config;
+
 use clap::Parser;
 use color_eyre::Result;
+use config::Config;
+use config::ConfigOverrides;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use windows::core::Result as WindowsCrateResult;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::MonitorFromWindow;
+use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::Graphics::Gdi::MONITORINFO;
+use windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST;
 use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE;
@@ -14,15 +24,20 @@ use windows::Win32::UI::WindowsAndMessaging::GetAncestor;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowLongW;
+use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
 use windows::Win32::UI::WindowsAndMessaging::GET_ANCESTOR_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
+use windows::Win32::UI::WindowsAndMessaging::GWL_STYLE;
 use windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE;
+use windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
+use windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZE;
+use windows_core::BOOL;
 use winput::message_loop;
 use winput::message_loop::Event;
 use winput::Action;
@@ -54,6 +69,9 @@ struct Opts {
     /// Path to a file with known focus-able HWNDs (e.g. komorebi.hwnd.json)
     #[clap(long)]
     hwnds: Option<PathBuf>,
+    /// Focus fullscreen windows (overrides config file)
+    #[clap(long)]
+    focus_fullscreen_windows: Option<bool>,
 }
 
 fn main() -> Result<()> {
@@ -85,13 +103,13 @@ fn main() -> Result<()> {
     };
 
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
-        std::env::set_var("RUST_LIB_BACKTRACE", "1");
+        unsafe { std::env::set_var("RUST_LIB_BACKTRACE", "1") };
     }
 
     color_eyre::install()?;
 
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe { std::env::set_var("RUST_LOG", "info") };
     }
 
     tracing::subscriber::set_global_default(
@@ -100,7 +118,13 @@ fn main() -> Result<()> {
             .finish(),
     )?;
 
-    listen_for_movements(hwnds.clone());
+    let config = Config::load_or_create(ConfigOverrides {
+        focus_fullscreen_windows: opts.focus_fullscreen_windows,
+    })?;
+
+    tracing::debug!("config loaded: {:?}", config);
+
+    listen_for_movements(hwnds.clone(), Arc::clone(&config));
 
     match hwnds {
         None => tracing::info!("masir is now running"),
@@ -126,7 +150,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn listen_for_movements(hwnds: Option<PathBuf>) {
+fn listen_for_movements(hwnds: Option<PathBuf>, config: Arc<Config>) {
     std::thread::spawn(move || {
         let receiver = message_loop::start().expect("could not start winput message loop");
 
@@ -323,6 +347,16 @@ fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 should_raise = cursor_root_is_eligible && foreground_is_eligible;
                             }
 
+                            if should_raise
+                                && !config.focus_fullscreen_windows()
+                                && is_window_fullscreen(cursor_root_hwnd)
+                            {
+                                tracing::debug!(
+                                    "skipping hwnd {cursor_root_hwnd}: window is fullscreen"
+                                );
+                                should_raise = false;
+                            }
+
                             if should_raise {
                                 match raise_and_focus_window(cursor_root_hwnd) {
                                     Ok(_) => {
@@ -411,6 +445,16 @@ impl_process_windows_crate_integer_wrapper_result!(
     HWND => isize,
 );
 
+impl ProcessWindowsCrateResult<()> for BOOL {
+    fn process(self) -> Result<()> {
+        if self.as_bool() {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
+    }
+}
+
 impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
     fn process(self) -> Result<T> {
         match self {
@@ -487,4 +531,83 @@ fn real_window_class_w(hwnd: isize) -> Result<String> {
     }))?;
 
     Ok(String::from_utf16(&class[0..len as usize])?)
+}
+
+// Needs to be either WS_MAXIMIZE style (Windows native fullscreen) or the window dimensions match the monitor dimensions it's on
+fn is_window_fullscreen(hwnd: isize) -> bool {
+    // WS_MAXIMIZE?
+    if is_window_maximized(hwnd) {
+        tracing::debug!("hwnd {hwnd} detected as fullscreen: WS_MAXIMIZE style");
+        return true;
+    }
+
+    // check window dimensions?
+    if let (Ok(window_rect), Ok(monitor_rect)) = (get_window_rect(hwnd), get_monitor_rect(hwnd)) {
+        let window_width = window_rect.right - window_rect.left;
+        let window_height = window_rect.bottom - window_rect.top;
+        let monitor_width = monitor_rect.right - monitor_rect.left;
+        let monitor_height = monitor_rect.bottom - monitor_rect.top;
+
+        // exact match
+        if window_width == monitor_width && window_height == monitor_height {
+            tracing::debug!("hwnd {hwnd} detected as fullscreen: exact monitor size match");
+            return true;
+        }
+
+        // check if window bounds contain or exceed monitor bounds
+        if window_rect.left <= monitor_rect.left
+            && window_rect.top <= monitor_rect.top
+            && window_rect.right >= monitor_rect.right
+            && window_rect.bottom >= monitor_rect.bottom
+        {
+            tracing::debug!(
+                "hwnd {hwnd} detected as fullscreen: window covers entire monitor \
+                (window: {}x{} at ({},{}), monitor: {}x{} at ({},{}))",
+                window_width,
+                window_height,
+                window_rect.left,
+                window_rect.top,
+                monitor_width,
+                monitor_height,
+                monitor_rect.left,
+                monitor_rect.top
+            );
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_window_maximized(hwnd: isize) -> bool {
+    let style = get_window_style(hwnd);
+    style.contains(WS_MAXIMIZE)
+}
+
+fn get_window_style(hwnd: isize) -> WINDOW_STYLE {
+    unsafe { WINDOW_STYLE(GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_STYLE) as u32) }
+}
+
+fn get_window_rect(hwnd: isize) -> Result<RECT> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(HWND(as_ptr!(hwnd)), &mut rect) }.process()?;
+    Ok(rect)
+}
+
+fn get_monitor_rect(hwnd: isize) -> Result<RECT> {
+    let monitor = unsafe { MonitorFromWindow(HWND(as_ptr!(hwnd)), MONITOR_DEFAULTTONEAREST) };
+
+    if monitor == HMONITOR::default() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+
+    unsafe { windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut monitor_info) }
+        .process()?;
+
+    Ok(monitor_info.rcMonitor)
 }
