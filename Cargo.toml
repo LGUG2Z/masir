@@ -15,11 +15,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 windows-core = "0.62"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
+global-hotkey = "0.8"
 
 [dependencies.windows]
 version = "0.62"
 features = [
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Input",
-    "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input",
+  "Win32_UI_Input_KeyboardAndMouse",
 ]

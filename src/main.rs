@@ -1,5 +1,9 @@
 use clap::Parser;
 use color_eyre::Result;
+use global_hotkey::hotkey::Code;
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::hotkey::Modifiers;
+use global_hotkey::GlobalHotKeyManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -151,7 +155,12 @@ fn main() -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
 
-    listen_for_movements(hwnds.clone(), opts.no_raise, running_clone);
+    let enabled = Arc::new(AtomicBool::new(true));
+    let enabled_clone = enabled.clone();
+
+    register_hotkey(enabled);
+
+    listen_for_movements(hwnds.clone(), opts.no_raise, running_clone, enabled_clone);
 
     match hwnds {
         None => tracing::info!("masir is now running"),
@@ -193,7 +202,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn listen_for_movements(hwnds: Option<PathBuf>, no_raise: bool, running: Arc<AtomicBool>) {
+fn listen_for_movements(
+    hwnds: Option<PathBuf>,
+    no_raise: bool,
+    running: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         let receiver = message_loop::start().expect("could not start winput message loop");
 
@@ -404,7 +418,7 @@ fn listen_for_movements(hwnds: Option<PathBuf>, no_raise: bool, running: Arc<Ato
                                 should_raise = cursor_root_is_eligible && foreground_is_eligible;
                             }
 
-                            if should_raise {
+                            if should_raise && enabled.load(Ordering::SeqCst) {
                                 match raise_and_focus_window(cursor_root_hwnd) {
                                     Ok(_) => {
                                         tracing::info!("raised hwnd: {cursor_root_hwnd}");
@@ -642,4 +656,35 @@ fn set_active_window_timeout(timeout_ms: u32) {
             SPIF_SENDCHANGE,
         );
     }
+}
+
+fn register_hotkey(enabled: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let manager = GlobalHotKeyManager::new().unwrap();
+        let hotkey = HotKey::new(Some(Modifiers::ALT), Code::KeyA);
+
+        manager.register(hotkey).unwrap();
+        tracing::info!("Hotkey registered successfully!");
+
+        let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+
+        unsafe {
+            // This requires win32 event loop to be able to register globally
+            use windows::Win32::UI::WindowsAndMessaging::DispatchMessageW;
+            use windows::Win32::UI::WindowsAndMessaging::GetMessageW;
+            use windows::Win32::UI::WindowsAndMessaging::MSG;
+            let mut msg = MSG::default();
+
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+
+                while let Ok(event) = receiver.try_recv() {
+                    if event.state == global_hotkey::HotKeyState::Pressed {
+                        let new_state = enabled.fetch_xor(true, Ordering::SeqCst);
+                        tracing::info!("Hotkey triggered! Focus tracking {}", !new_state);
+                    }
+                }
+            }
+        }
+    });
 }
